@@ -1,0 +1,179 @@
+#include <Servo.h>
+
+
+#define servoXP 12                           
+#define servoYP 11                           
+
+// "JYP" and "JXP" need to be assigned to analog pins.
+#define JYP A4                       // User changeable.
+#define JXP A5                       // User changeable.
+
+const long MIN_PULSE = 900;                      // User changeable.
+const long MAX_PULSE = 2100;                     // User changeable.
+const long MIN_POT = 0;                          // User changeable.
+const long MAX_POT = 1023;                       // User changeable.
+const long POWER_OF_TWO_TO_AVERAGE = 4;          // User changeable.
+// Changing "POWER_OF_TWO_TO_AVERAGE" changes several other constants.
+// The constants "BUFFER_SIZE" and "BUFFER_LIMIT" are calculated based on "POWER_OF_TWO_TO_AVERAGE".
+
+
+const long SERVO_PULSE_RANGE = MAX_PULSE - MIN_PULSE; // This needs to be a long for the equations to work correctly.
+const long START_PULSE_X = MIN_PULSE + (SERVO_PULSE_RANGE / 1);  // User changeable.
+const long START_PULSE_Y = MIN_PULSE + (SERVO_PULSE_RANGE / 2);  // User changeable.
+
+const long POT_RANGE = MAX_POT - MIN_POT;
+
+const int BUFFER_SIZE = 1 << POWER_OF_TWO_TO_AVERAGE; // Do not change.
+const int BUFFER_LIMIT = BUFFER_SIZE - 1;             // Do not change.
+
+// Time constants and variables should be unsigned longs.
+const unsigned long ANALOG_READ_PERIOD = 5000;  // read pots at 200Hz "ANALOG_READ_PERIOD" must be <= "DEBUG_PERIOD"
+const unsigned long DEBUG_PERIOD = 100000;  // update serial at 4Hz "DEBUG_PERIOD" must be >= "SERVO_PERIOD"
+const unsigned long SERVO_PERIOD = 20000;  // update servo at 50Hz
+
+const long LOW_CENTER_THRESHOLD = 482;     // User changeable.
+const long HIGH_CENTER_THRESHOLD = 510;    // User changeable.
+const long POT_TO_SPEED_CONSTANT = 5;     // User changeable. Larger values for slower speeds.
+
+long averagingBufferX[BUFFER_SIZE];
+long averagingBufferY[BUFFER_SIZE];
+int bufferIndex = 0;
+long servoPosition[] = {START_PULSE_X, START_PULSE_Y};
+
+long bufferTotalX = 0; //START_PULSE_X * BUFFER_SIZE;
+long bufferTotalY = 0; //START_PULSE_Y * BUFFER_SIZE;
+
+unsigned long lastDebug;
+unsigned long lastServo;
+unsigned long lastAnalogRead;
+
+Servo myServo[2];
+//Servo servoY;
+
+void setup()
+{
+  Serial.begin(9600);
+  myServo[0].writeMicroseconds(START_PULSE_X);
+  myServo[1].writeMicroseconds(START_PULSE_Y);
+  myServo[0].attach(servoXP, MIN_PULSE, MAX_PULSE);
+  myServo[1].attach(servoYP, MIN_PULSE, MAX_PULSE);
+
+  for (byte i; i < BUFFER_SIZE; i++)
+  {
+    averagingBufferX[i] = (MAX_POT - MIN_POT) / 2;
+    averagingBufferY[i] = (MAX_POT - MIN_POT) / 2;
+    bufferTotalX += averagingBufferX[i];
+    bufferTotalY += averagingBufferY[i];
+  }
+  
+  lastDebug = micros();
+  lastServo = lastDebug;
+  lastAnalogRead = lastDebug;
+}
+
+void loop()
+{
+  checkAnalogReadTime();
+}
+
+void checkAnalogReadTime()
+{
+  if (micros() - lastAnalogRead > ANALOG_READ_PERIOD)
+  {
+    lastAnalogRead += ANALOG_READ_PERIOD;
+    long joystickInputX = MAX_POT - analogRead(JXP); // Use this line to reverse direction of X.
+    long joystickInputY = MAX_POT - analogRead(JYP); // Use this line to reverse direction of Y.
+    
+    bufferIndex++;
+    bufferIndex &= BUFFER_LIMIT;
+   
+    bufferTotalX -= averagingBufferX[bufferIndex]; // out with the old
+    bufferTotalY -= averagingBufferY[bufferIndex];
+    averagingBufferX[bufferIndex] = joystickInputX;
+    averagingBufferY[bufferIndex] = joystickInputY;
+    bufferTotalX += averagingBufferX[bufferIndex]; // in with the new
+    bufferTotalY += averagingBufferY[bufferIndex];
+   
+    checkServoTime();
+  }
+}
+
+
+void checkServoTime()
+// Called from "checkAnalogReadTime" function.
+{
+  if (micros() - lastServo > SERVO_PERIOD)
+  {
+    lastServo += SERVO_PERIOD;
+    controlServo();
+  }
+}
+
+void controlServo()
+// Called from "checkServoTime" function.
+{
+
+  long average[2];
+  long servoSpeed[2];
+  
+  average[0] = bufferTotalX >> POWER_OF_TWO_TO_AVERAGE; // it might be a good idea to make averageX global so it can be used elsewhere in program
+  average[1] = bufferTotalY >> POWER_OF_TWO_TO_AVERAGE;
+
+  for (int i = 0; i < 2; i++)
+  {
+    if (average[i] < LOW_CENTER_THRESHOLD)
+    {
+      servoSpeed[i] = (average[i] - LOW_CENTER_THRESHOLD) / POT_TO_SPEED_CONSTANT;
+      // negative speed proportional to distance from center pot
+    }
+    else if  (average[i] > HIGH_CENTER_THRESHOLD)
+    {
+      servoSpeed[i] = (average[i] - HIGH_CENTER_THRESHOLD) / POT_TO_SPEED_CONSTANT;
+                    // positive speed
+    }
+    else // pot in dead zone
+    {
+      servoSpeed[i] = 0;
+    }
+    servoPosition[i] += servoSpeed[i]; // but you should make sure "servoPosition" stays within endpoints
+    if (servoPosition[i] > MAX_PULSE)
+    {
+      servoPosition[i] = MAX_PULSE;
+    }
+    else if (servoPosition[i] < MIN_PULSE)
+    {
+      servoPosition[i] = MIN_PULSE;
+    }
+    myServo[i].writeMicroseconds(servoPosition[i]);
+  }
+
+  checkDebugTime(average[0], average[1], servoPosition[0], servoPosition[1], servoSpeed[0], servoSpeed[1]);
+}
+
+void checkDebugTime(long averageX, long averageY, long servoOutputX, long servoOutputY, long speedX, long speedY)
+// Called from "checkServoTime" function.
+// Serial output slows down code execution.
+// This method checks to see if it's time to
+// display data.
+// It would probably be a good idea to remove this section of code
+// once the program is working as hoped and when serial
+// output is now longer desired.
+{
+  if (micros() - lastDebug > DEBUG_PERIOD)
+  {
+    lastDebug += DEBUG_PERIOD;
+
+    Serial.print(F("average = "));
+    Serial.print(averageX, DEC);
+    Serial.print(F(", "));
+    Serial.print(averageY, DEC);
+    Serial.print(F(", Servo = "));
+    Serial.print(servoOutputX, DEC);
+    Serial.print(F(", "));
+    Serial.print(servoOutputY, DEC);
+    Serial.print(F(", Speed = "));
+    Serial.print(speedX, DEC);
+    Serial.print(F(", "));
+    Serial.println(speedY, DEC);
+  }
+}
